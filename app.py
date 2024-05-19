@@ -1,6 +1,6 @@
 from curl_cffi import requests
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from hashlib import sha3_512
 import uuid
@@ -27,6 +27,8 @@ init_headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Oai-Language": "en-US",
 }
+user_data = {}
+chatgpt = None
 
 
 class ProofWorker:
@@ -84,8 +86,6 @@ class ChatGpt:
         self.proof_worker = ProofWorker()
         self.chat_requirements_url = "https://chat.openai.com/backend-anon/sentinel/chat-requirements"
         self.chat_url = "https://chat.openai.com/backend-anon/conversation"
-        self.parent_id = None
-        self.conversation_id = None
 
     def send_message(self, message, parent_message_id=None, conversation_id=None, retry_count=5):
         err = retry_count
@@ -126,13 +126,13 @@ class ChatGpt:
                 err -= 1
         return False, "Maybe your proxy is blocked.Please change another proxy."
 
-    def chat(self, message, remember_history=False, retry_count=5):
+    def chat(self, message, remember_history=False, retry_count=5, client_host=None):
         if remember_history:
-            if self.parent_id and self.conversation_id:
+            if client_host in user_data and "parent_id" in user_data[client_host] and "conversation_id" in user_data[client_host]:
                 status, res = self.send_message(
                     message,
-                    parent_message_id=self.parent_id,
-                    conversation_id=self.conversation_id,
+                    parent_message_id=user_data[client_host]['parent_id'],
+                    conversation_id=user_data[client_host]['conversation_id'],
                     retry_count=retry_count
                 )
             else:
@@ -140,8 +140,10 @@ class ChatGpt:
         else:
             status, res = self.send_message(message, retry_count)
         if status:
-            self.parent_id = res['message']['id']
-            self.conversation_id = res['conversation_id']
+            if client_host not in user_data:
+                user_data[client_host] = {}
+            user_data[client_host]['parent_id'] = res['message']['id']
+            user_data[client_host]['conversation_id'] = res['conversation_id']
             content = res['message']['content']['parts'][0]
             return True, content
         else:
@@ -157,14 +159,17 @@ class ChatItem(BaseModel):
 
 
 @app.post("/chat_with_gpt/")
-def chat_with_gpt(chat_item: ChatItem):
+def chat_with_gpt(chat_item: ChatItem, request: Request):
+    global chatgpt
     headers = chat_item.headers
     proxies = chat_item.proxies
     message = chat_item.message
     remember_history = chat_item.remember_history
     retry_count = chat_item.retry_count
-    chatgpt = ChatGpt(headers if headers else init_headers, proxies)
-    status, reply_msg = chatgpt.chat(message, remember_history, retry_count)
+    request_host = request.client.host
+    if chatgpt is None:
+        chatgpt = ChatGpt(headers if headers else init_headers, proxies)
+    status, reply_msg = chatgpt.chat(message, remember_history, retry_count, request_host)
     code = 0
     if status:
         code = 1
